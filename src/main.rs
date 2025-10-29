@@ -18,7 +18,14 @@ struct Properties {
     application_binary: String,
 }
 
+const DELAY_MILLIS: u64 = 200;
+const LOW_VOLUME: u8 = 40;
+const STEP: u8 = 5;
+
 fn main() {
+    let mut current_volume = 100;
+    let mut target_volume = 100;
+
     loop {
         // get the output string of pactl
         let json_output = get_pactl_output().expect("huh");
@@ -49,13 +56,25 @@ fn main() {
             }
 
             if !running_apps {
-                set_volume(music_index, 100);
+                target_volume = 100;
+                if current_volume < target_volume {
+                    current_volume += STEP;
+                } else if current_volume > target_volume {
+                    current_volume -= STEP;
+                }
+                set_volume(music_index, current_volume);
             } else {
-                set_volume(music_index, 35);
+                target_volume = LOW_VOLUME;
+                if current_volume < target_volume {
+                    current_volume += STEP;
+                } else if current_volume > target_volume {
+                    current_volume -= STEP;
+                }
+                set_volume(music_index, current_volume);
             }
         }
 
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(DELAY_MILLIS));
     }
 }
 
