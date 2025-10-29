@@ -59,18 +59,20 @@ fn main() {
                 target_volume = 100;
                 if current_volume < target_volume {
                     current_volume += STEP;
+                    set_volume(music_index, current_volume);
                 } else if current_volume > target_volume {
                     current_volume -= STEP;
+                    set_volume(music_index, current_volume);
                 }
-                set_volume(music_index, current_volume);
             } else {
                 target_volume = LOW_VOLUME;
                 if current_volume < target_volume {
                     current_volume += STEP;
+                    set_volume(music_index, current_volume);
                 } else if current_volume > target_volume {
                     current_volume -= STEP;
+                    set_volume(music_index, current_volume);
                 }
-                set_volume(music_index, current_volume);
             }
         }
 
@@ -95,6 +97,8 @@ fn set_volume(index: u32, volume_percent: u8) {
 
     if !status.success() {
         eprintln!("Warning: Failed to set volume on index {}", index);
+    } else {
+        println!("Set volume to {}% for {}", volume_percent, index)
     }
 }
 
