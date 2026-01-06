@@ -19,16 +19,17 @@ struct Properties {
 }
 
 const DELAY_MILLIS: u64 = 200;
-const LOW_VOLUME: u8 = 40;
+const LOW_VOLUME: u8 = 50;
 const STEP: u8 = 5;
 
 fn main() {
-    let mut current_volume = 100;
+    let mut current_volume = 100; // gonna change later
     let mut target_volume = 100;
 
     loop {
         // get the output string of pactl
         let json_output = get_pactl_output().expect("huh");
+        // convert the stream
         let streams: Vec<SinkInput> = parse_json(&json_output);
 
         let mut music_app_index: Option<u32> = None;
@@ -47,32 +48,24 @@ fn main() {
             let mut running_apps: bool = false;
             for stream in streams {
                 if stream.index != music_index {
-                    if !stream.corked {
-                        if !stream.mute {
-                            running_apps = true;
-                        }
+                    if !stream.corked && !stream.mute {
+                        running_apps = true;
                     }
                 }
             }
 
-            if !running_apps {
-                target_volume = 100;
-                if current_volume < target_volume {
-                    current_volume += STEP;
-                    set_volume(music_index, current_volume);
-                } else if current_volume > target_volume {
-                    current_volume -= STEP;
-                    set_volume(music_index, current_volume);
-                }
-            } else {
+            if running_apps {
                 target_volume = LOW_VOLUME;
-                if current_volume < target_volume {
-                    current_volume += STEP;
-                    set_volume(music_index, current_volume);
-                } else if current_volume > target_volume {
-                    current_volume -= STEP;
-                    set_volume(music_index, current_volume);
-                }
+            } else {
+                target_volume = 100;
+            }
+
+            if current_volume < target_volume {
+                current_volume += STEP;
+                set_volume(music_index, current_volume);
+            } else if current_volume > target_volume {
+                current_volume -= STEP;
+                set_volume(music_index, current_volume);
             }
         }
 
