@@ -1,0 +1,16 @@
+[Unit]
+Description=Auto Volume - duck YouTube Music when other audio plays
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/auto-volume
+Restart=on-failure
+RestartSec=5
+# Needed so wmctrl/xdotool can reach the X display.
+# If your display is not :0 adjust accordingly, or remove if on Wayland.
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=graphical-session.target
