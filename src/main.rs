@@ -41,25 +41,20 @@ const YTM_BINARY_PATTERNS: &[&str] = &["youtube-music", "youtubemusic"];
 
 // One-shot system sound players that should never trigger ducking
 const SYSTEM_SOUND_BINARIES: &[&str] = &[
-    "paplay",           // pactl / PulseAudio one-shot player
-    "aplay",            // ALSA one-shot player
+    "paplay",            // pactl / PulseAudio one-shot player
+    "aplay",             // ALSA one-shot player
     "canberra-gtk-play", // GTK sound theme player (GNOME, XFCE, …)
     "ogg123",
     "mpg123",
 ];
 
-// Browser binary substrings — used to gate the (expensive) window-title check
 const BROWSER_BINARY_PATTERNS: &[&str] = &[
-    "chromium",
-    "chrome",
-    "firefox",
-    "brave",
-    "opera",
-    "vivaldi",
-    "edge",
-    "waterfox",
-    "librewolf",
+    "chromium", "chrome", "firefox", "brave", "opera", "vivaldi", "edge", "waterfox", "librewolf",
 ];
+
+fn is_browser_binary(binary: &str) -> bool {
+    BROWSER_BINARY_PATTERNS.iter().any(|&b| binary.contains(b))
+}
 
 fn is_system_sound(stream: &SinkInput) -> bool {
     let role = stream.properties.media_role.as_deref().unwrap_or("").to_lowercase();
@@ -71,24 +66,9 @@ fn is_system_sound(stream: &SinkInput) -> bool {
 }
 
 fn is_youtube_music(stream: &SinkInput) -> bool {
-    let binary = stream
-        .properties
-        .application_binary
-        .as_deref()
-        .unwrap_or("")
-        .to_lowercase();
-    let app_name = stream
-        .properties
-        .application_name
-        .as_deref()
-        .unwrap_or("")
-        .to_lowercase();
-    let media_name = stream
-        .properties
-        .media_name
-        .as_deref()
-        .unwrap_or("")
-        .to_lowercase();
+    let binary = stream.properties.application_binary.as_deref().unwrap_or("").to_lowercase();
+    let app_name = stream.properties.application_name.as_deref().unwrap_or("").to_lowercase();
+    let media_name = stream.properties.media_name.as_deref().unwrap_or("").to_lowercase();
 
     // Dedicated YouTube Music desktop app (any variant)
     if YTM_BINARY_PATTERNS.iter().any(|&p| binary.contains(p)) {
@@ -102,7 +82,7 @@ fn is_youtube_music(stream: &SinkInput) -> bool {
     }
 
     // For browsers: check window titles by PID (X11 only, best-effort)
-    if BROWSER_BINARY_PATTERNS.iter().any(|&b| binary.contains(b)) {
+    if is_browser_binary(&binary) {
         if let Some(pid) = &stream.properties.application_process_id {
             return pid_has_youtube_music_window(pid);
         }
@@ -150,23 +130,45 @@ fn main() {
     let mut current_volume: u8 = 100;
     let mut target_volume: u8 = 100;
     let mut duck_ticks: u32 = 0;
+    // Indices seen as YTM last tick — lets us immediately apply volume to newly appearing streams.
+    let mut prev_ytm_indices: Vec<u32> = Vec::new();
 
     loop {
         let json_output = get_pactl_output().expect("Failed to get pactl output");
         let streams: Vec<SinkInput> = parse_json(&json_output);
 
-        let mut music_app_index: Option<u32> = None;
+        // Collect ALL active YouTube Music streams.
+        // There can be more than one during a song transition (ending + starting stream).
+        let ytm_indices: Vec<u32> = streams
+            .iter()
+            .filter(|s| !s.corked && is_youtube_music(s))
+            .map(|s| s.index)
+            .collect();
 
-        for stream in &streams {
-            if !stream.corked && is_youtube_music(stream) {
-                music_app_index = Some(stream.index);
-            }
-        }
-
-        if let Some(music_index) = music_app_index {
-            let other_audio = streams
+        if !ytm_indices.is_empty() {
+            // Binary of the YTM source, used to recognise sibling transition streams.
+            let ytm_binary = streams
                 .iter()
-                .any(|s| s.index != music_index && !s.corked && !s.mute && !is_system_sound(s));
+                .find(|s| ytm_indices.contains(&s.index))
+                .and_then(|s| s.properties.application_binary.as_deref())
+                .unwrap_or("")
+                .to_lowercase();
+
+            let other_audio = streams.iter().any(|s| {
+                // Exclude the YTM streams themselves
+                if ytm_indices.contains(&s.index) || s.corked || s.mute || is_system_sound(s) {
+                    return false;
+                }
+                // A browser stream from the same binary with no media.name is almost certainly a
+                // transition stream for the incoming song — ignore it to avoid false ducking.
+                let s_bin = s.properties.application_binary.as_deref().unwrap_or("").to_lowercase();
+                if s_bin == ytm_binary && is_browser_binary(&s_bin) {
+                    if s.properties.media_name.as_deref().unwrap_or("").is_empty() {
+                        return false;
+                    }
+                }
+                true
+            });
 
             if other_audio {
                 duck_ticks = duck_ticks.saturating_add(1);
@@ -174,22 +176,27 @@ fn main() {
                 duck_ticks = 0;
             }
 
-            // Require the condition to persist for DUCK_DEBOUNCE_TICKS before ducking.
-            // This drops spurious blips (idle browser audio contexts, untagged sound effects, etc.)
-            // without any perceptible delay for real audio.
             target_volume = if duck_ticks >= DUCK_DEBOUNCE_TICKS { LOW_VOLUME } else { 100 };
 
             if current_volume < target_volume {
                 current_volume += STEP;
-                set_volume(music_index, current_volume);
             } else if current_volume > target_volume {
                 current_volume -= STEP;
-                set_volume(music_index, current_volume);
+            }
+
+            // Apply volume to every YTM stream.
+            // New streams (not seen last tick) get the current level immediately so they never
+            // start at 100% when we're already ducked.
+            for &idx in &ytm_indices {
+                if current_volume != target_volume || !prev_ytm_indices.contains(&idx) {
+                    set_volume(idx, current_volume);
+                }
             }
         } else {
             duck_ticks = 0;
         }
 
+        prev_ytm_indices = ytm_indices;
         thread::sleep(Duration::from_millis(DELAY_MILLIS));
     }
 }
