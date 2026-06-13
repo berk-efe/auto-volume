@@ -23,14 +23,30 @@ struct Properties {
     // PipeWire / some PulseAudio setups expose the tab/media title here
     #[serde(rename = "media.name")]
     media_name: Option<String>,
+
+    // Standard PA/PW property: "event" and "notification" are transient system sounds
+    #[serde(rename = "media.role")]
+    media_role: Option<String>,
 }
 
 const DELAY_MILLIS: u64 = 200;
 const LOW_VOLUME: u8 = 50;
 const STEP: u8 = 5;
+// Number of consecutive ticks another stream must be active before ducking kicks in.
+// At 200ms/tick this is 1 second — long enough to ignore blips, short enough to feel instant.
+const DUCK_DEBOUNCE_TICKS: u32 = 5;
 
 // Substrings matched against the process binary name (lowercased)
 const YTM_BINARY_PATTERNS: &[&str] = &["youtube-music", "youtubemusic"];
+
+// One-shot system sound players that should never trigger ducking
+const SYSTEM_SOUND_BINARIES: &[&str] = &[
+    "paplay",           // pactl / PulseAudio one-shot player
+    "aplay",            // ALSA one-shot player
+    "canberra-gtk-play", // GTK sound theme player (GNOME, XFCE, …)
+    "ogg123",
+    "mpg123",
+];
 
 // Browser binary substrings — used to gate the (expensive) window-title check
 const BROWSER_BINARY_PATTERNS: &[&str] = &[
@@ -44,6 +60,15 @@ const BROWSER_BINARY_PATTERNS: &[&str] = &[
     "waterfox",
     "librewolf",
 ];
+
+fn is_system_sound(stream: &SinkInput) -> bool {
+    let role = stream.properties.media_role.as_deref().unwrap_or("").to_lowercase();
+    if role == "event" || role == "notification" {
+        return true;
+    }
+    let binary = stream.properties.application_binary.as_deref().unwrap_or("").to_lowercase();
+    SYSTEM_SOUND_BINARIES.iter().any(|&b| binary == b)
+}
 
 fn is_youtube_music(stream: &SinkInput) -> bool {
     let binary = stream
@@ -124,6 +149,7 @@ fn pid_has_youtube_music_window(pid: &str) -> bool {
 fn main() {
     let mut current_volume: u8 = 100;
     let mut target_volume: u8 = 100;
+    let mut duck_ticks: u32 = 0;
 
     loop {
         let json_output = get_pactl_output().expect("Failed to get pactl output");
@@ -138,11 +164,20 @@ fn main() {
         }
 
         if let Some(music_index) = music_app_index {
-            let running_apps = streams
+            let other_audio = streams
                 .iter()
-                .any(|s| s.index != music_index && !s.corked && !s.mute);
+                .any(|s| s.index != music_index && !s.corked && !s.mute && !is_system_sound(s));
 
-            target_volume = if running_apps { LOW_VOLUME } else { 100 };
+            if other_audio {
+                duck_ticks = duck_ticks.saturating_add(1);
+            } else {
+                duck_ticks = 0;
+            }
+
+            // Require the condition to persist for DUCK_DEBOUNCE_TICKS before ducking.
+            // This drops spurious blips (idle browser audio contexts, untagged sound effects, etc.)
+            // without any perceptible delay for real audio.
+            target_volume = if duck_ticks >= DUCK_DEBOUNCE_TICKS { LOW_VOLUME } else { 100 };
 
             if current_volume < target_volume {
                 current_volume += STEP;
@@ -151,6 +186,8 @@ fn main() {
                 current_volume -= STEP;
                 set_volume(music_index, current_volume);
             }
+        } else {
+            duck_ticks = 0;
         }
 
         thread::sleep(Duration::from_millis(DELAY_MILLIS));
